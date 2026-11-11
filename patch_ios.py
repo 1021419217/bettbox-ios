@@ -11,6 +11,8 @@ import json
 import plistlib
 import zipfile
 
+DISABLE_RUST = os.environ.get("DISABLE_RUST") == "1"
+
 ROOT = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else ".")
 ICONS_ZIP = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else ""
 CORE_OK = os.path.exists(os.path.join(ROOT, "ios", "Runner", "libmeta.a"))
@@ -193,6 +195,15 @@ s = s.replace(
 )
 write(p, s)
 print("[patch] ok: application.dart 跳过 AndroidManager")
+
+# ---------------------------------------------------------------- 可选: 禁用 code_forge 的 Rust 编译
+if DISABLE_RUST:
+    p = "plugins/code_forge/ios/code_forge.podspec"
+    s = read(p)
+    s = re.sub(r"\n\s*s\.script_phase = \{.*?\n\s*\}\n", "\n", s, flags=re.S)
+    s = re.sub(r"\n\s*'OTHER_LDFLAGS' =>[^\n]*\n", "\n", s)
+    write(p, s)
+    print("[patch] ok: 禁用 code_forge Rust build phase（脚本引擎功能降级，保证可出包）")
 
 # ---------------------------------------------------------------- iOS 工程配置
 pbx = "ios/Runner.xcodeproj/project.pbxproj"
