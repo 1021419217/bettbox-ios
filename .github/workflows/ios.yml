@@ -7,6 +7,10 @@ on:
         description: "上游 tag（默认 v1.19.8）"
         required: false
         default: "v1.19.8"
+      disable_rust:
+        description: "禁用 code_forge 的 Rust 脚本引擎（兜底出包）"
+        required: false
+        default: "false"
 
 env:
   UPSTREAM_REPO: appshubcc/Bettbox
@@ -86,11 +90,27 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare Rust bindings for iOS
+        if: inputs.disable_rust != 'true'
+        shell: bash
+        working-directory: src/plugins/code_forge/rust
+        run: |
+          set -x
+          cargo fetch --target aarch64-apple-ios
+          for d in ~/.cargo/registry/src/*/rquickjs-sys-*/src/bindings; do
+            if [ -f "$d/aarch64-apple-darwin.rs" ]; then
+              cp "$d/aarch64-apple-darwin.rs" "$d/aarch64-apple-ios.rs"
+              echo "patched ios bindings: $d/aarch64-apple-ios.rs"
+            fi
+          done
+
       - name: Patch project for iOS
         shell: bash
+        env:
+          DISABLE_RUST: ${{ inputs.disable_rust == 'true' && '1' || '0' }}
         run: |
           python3 buildkit/patch_ios.py "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/buildkit/appicons.zip"
-          echo "core linked: ${{ env.GO_CORE_OK }}"
+          echo "core linked: ${{ env.GO_CORE_OK }}, disable_rust: ${{ env.DISABLE_RUST }}"
 
       - name: Flutter pub get
         working-directory: src
