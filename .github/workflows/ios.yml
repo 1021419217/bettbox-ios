@@ -1,0 +1,136 @@
+name: Bettbox iOS unsigned IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "上游 tag（默认 v1.19.8）"
+        required: false
+        default: "v1.19.8"
+
+env:
+  UPSTREAM_REPO: appshubcc/Bettbox
+  IPA_NAME: Bettbox-1.19.8-ios-unsigned.ipa
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Checkout buildkit
+        uses: actions/checkout@v4
+        with:
+          path: buildkit
+
+      - name: Checkout upstream Bettbox
+        uses: actions/checkout@v4
+        with:
+          repository: appshubcc/Bettbox
+          ref: ${{ inputs.ref || 'v1.19.8' }}
+          fetch-depth: 1
+          path: src
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache-dependency-path: src/core/go.sum
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: "3.47.7"
+          cache: true
+
+      - name: Flutter config
+        run: flutter config --no-enable-swift-package-manager
+
+      - name: Create iOS runner
+        working-directory: src
+        run: |
+          flutter create --platforms=ios --org com.appshubcc --project-name bett_box .
+          ls ios
+
+      - name: Build Go core for iOS (arm64, c-archive)
+        id: core
+        continue-on-error: true
+        shell: bash
+        working-directory: src/core
+        run: |
+          set -x
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          CLANG=$(xcrun --sdk iphoneos -f clang)
+          export GOOS=ios GOARCH=arm64 CGO_ENABLED=1
+          export CC="$CLANG -arch arm64 -isysroot $SDK -miphoneos-version-min=15.0"
+          export CFLAGS="-O2 -arch arm64 -isysroot $SDK -miphoneos-version-min=15.0"
+          go mod tidy
+          if go build -trimpath \
+              -tags=no_easytier,no_tailscale,no_zerotier,no_fake_tcp,with_low_memory \
+              -buildmode=c-archive \
+              -o ../ios/Runner/libmeta.a . ; then
+            echo "GO_CORE_OK=1" >> "$GITHUB_ENV"
+            ls -lh ../ios/Runner/libmeta.a
+          else
+            echo "GO_CORE_OK=0" >> "$GITHUB_ENV"
+            rm -f ../ios/Runner/libmeta.a ../ios/Runner/libmeta.h
+            echo "Go core build failed, continue with Flutter shell only"
+            exit 1
+          fi
+
+      - name: Patch project for iOS
+        shell: bash
+        run: |
+          python3 buildkit/patch_ios.py "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/buildkit/appicons.zip"
+          echo "core linked: ${{ env.GO_CORE_OK }}"
+
+      - name: Flutter pub get
+        working-directory: src
+        run: flutter pub get
+
+      - name: Build iOS (release, no codesign)
+        working-directory: src
+        run: flutter build ios --release --no-codesign --verbose
+
+      - name: Pack unsigned IPA
+        shell: bash
+        run: |
+          set -e
+          APP=$(find "$GITHUB_WORKSPACE/src/build/ios/iphoneos" -maxdepth 1 -name '*.app' -type d | head -1)
+          echo "APP=$APP"
+          test -n "$APP"
+          mkdir -p "$GITHUB_WORKSPACE/out/Payload"
+          cp -R "$APP" "$GITHUB_WORKSPACE/out/Payload/"
+          cd "$GITHUB_WORKSPACE/out"
+          zip -qry "$IPA_NAME" Payload
+          ls -lh "$IPA_NAME"
+          unzip -l "$IPA_NAME" | head -20
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned
+          path: out/${{ env.IPA_NAME }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload diagnostic files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics
+          path: |
+            src/ios/Runner.xcodeproj/project.pbxproj
+            src/ios/Flutter/Release.xcconfig
+            src/ios/Runner/Info.plist
+            src/ios/Podfile
+          if-no-files-found: warn
+          retention-days: 7
